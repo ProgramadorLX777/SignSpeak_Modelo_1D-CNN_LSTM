@@ -1,0 +1,325 @@
+CONCEPTOS IMPORTANTES:
+
+- Landmarks: Son las líneas que representan las coordenadas de la mano, en este caso 21 por mano.
+- Clases: Son las definiciones de las señas a grabar y en donde se almacenan.
+
+LIBRERÍAS SIGNSPEAK:
+
+import
+    - cv2: Manejo cámaras, lee frames y muestra ventanas
+    - mediapipe: Detecta manos, rostro, pose (usando módulo actual: "Hands")
+    - os: Controla elementos del sistema (en este caso windows)
+    - time: Pausas temporales para las ventanas de grabacion y reconocimiento
+
+CÓDIGO PRINCIPAL GRABADOR:
+
+- mp_hands = mp.solutions.hands: Guarda el módulo de detección de manos
+- DATA_PATH = "data_cnn_lstm_bimano"
+os.makedirs(DATA_PATH, exist_ok=True): Usa la libería os para crear una carpeta para guardar los archivos .npy
+y tiene una validación para evitar errores si es que existe.
+
+- NUM_SECUENCIAS = 7 -> Se define el n° de secuencias para grabar
+- NUM_FRAMES = 50 -> Se define los frames que se grabarán en cada secuencia para cada clase
+
+- def extraer_manos(results): Función que retorna los frames de ambas manos
+    mano_izq = np.zeros((21, 3)) -> Define la cantidad de landmarks 21 por cada mano, 
+    en este caso el segundo valor referencia los 3 ejes: (x, y, z)
+    mano_der = np.zeros((21, 3)) -> Define la cantidad de landmarks 21 por cada mano, 
+    en este caso el segundo valor referencia los 3 ejes: (x, y, z)
+    (SI FALTA UNA MANO SE RELLENA CON 0)
+
+- if results.multi_handedness and results.multi_hand_landmarks: Comprueba si mediapipe detectó las manos
+    for idx, hand_info in enumerate(results.multi_handedness): Luego recorre cada mano detectada puede ser 
+    1 o 22.
+    label = hand_info.classification[0].label -> Define con una etiqueta si es mano izquierda o derecha
+    lm = results.multi_hand_landmarks[idx] -> Se guarda en una variable los 21 puntos de la mano
+    puntos = np.array([[p.x, p.y, p.z] for p in lm.landmark]) -> En un array extrae las coordenadas de los 
+    21 landmarks
+        
+- if label == "Left": -> Asegura devolver manos ordenadas correspondiendo a izquierda o derecha
+    mano_izq = puntos
+else:
+    mano_der = puntos
+
+- return mano_izq, mano_der: Devuelve dos matrices de tamaño (21.3)
+
+- cap = cv2.VideoCapture(0) -> Abre la cámara en una ventana
+- frames = [] -> Se guardan los 50 frames en una lista
+
+with mp_hands.Hands( -> Configuración de mediapipe hands
+    model_complexity=1, -> Define más precisión
+    max_num_hands=2, -> Define la cantidad de manos a detectar
+    min_detection_confidence=0.6, -> Detecta la confianza de las manos
+    min_tracking_confidence=0.6
+) as hands:
+
+while len(frames) < NUM_FRAMES: Empieza la grabación de 50 frames hasta completarlos
+
+frame_vis = cv2.flip(frame, 1) -> Corrige el espejo invertido de visualización, pero no los frames 
+para no alterar datos.
+
+img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) -> Transformación ya que mediapipe requiere RGB.
+results = hands.process(img_rgb)
+
+mano_izq, mano_der = extraer_manos(results) -> Obtiene las manos estándar.
+
+frame_vec = np.concatenate([mano_izq.reshape(21,3), mano_der.reshape(21,3)], axis=0).flatten()
+(Produce un vector de 42 puntos, o sea por 21 por cada mano, multiplicado por los 3 ejes, x, y, z)
+
+np.save(os.path.join(out_dir, f"seq_{indice}.npy"), frames)
+(Se guarda con forma (50 -> Frames, 126 -> Coordenadas))
+
+clase = input("Nombre de la clase: ") -> Entrada del usuario para el nombre de la clase a grabar
+
+existentes = [f for f in os.listdir(out_dir) if f.endswith(".npy")]
+inicio = len(existentes)
+(Analiza las secuencias existentes para grabar secuencias ordenadas)
+
+CÓDIGO PRINCIPAL ENTRENADOR:
+
+SEQ_LEN = 50        # longitud fija de cada secuencia
+FEATURES = 126      # 42 puntos (21 por mano) × 3 coordenadas
+BATCH_SIZE = 16
+EPOCHS = 60
+LR = 0.0006
+VALID_SPLIT = 0.2
+SEED = 42
+
+TODO ESTOS DATOS DEFINEN LA LONGITUD DE SECUENCIA LAS COORDENADAS Y PRECISION!!
+
+# CONFIG
+DATA_DIR = "data_cnn_lstm_bimano"
+MODELS_DIR = "models"
+MODEL_PATH = os.path.join(MODELS_DIR, "modelo_cnn_lstm_bimanual.pth")
+LABELS_PATH = os.path.join(MODELS_DIR, "labels_bimano.pkl")
+
+EN ESTE APARTADO SE GUARDA EN UNA CARPETA EL MODELO PARA LUEGO ACCEDER A ÉL Y GUARDA LOS LABELS 
+O ETIQUETAS QUE LUEGO SE CONVIERTEN EN ID IDENTIFICABLES.
+
+label_to_id = {lbl: i for i, lbl in enumerate(labels)} -> RECORRE CADA CLASE DE SEÑA Y LUEGO LA ENUMERA
+{'hola': 0, 'gracias': 1, 'chao': 2} -> DE ESTA MANERA SECUENCIAL
+
+arr = np.load(...)
+if arr.shape != (SEQ_LEN, FEATURES):
+    print("Ignorado...")
+    continue
+
+LO QUE NO RECONOCE EN BASE A LOS PARAMETROS PREDEFINIDOS LOS IGNORA
+
+X = np.stack(X_list)  # (N, 50, 126) -> SECUENCIAS
+y = np.array(y_list) -> ETIQUETAS
+
+EJEMPLO:
+X: (80 secuencias, 50 frames, 126 features)
+y: (80)
+
+CREA EL DATASET Y REALIZA LA DIVISIÓN PARA 80% ENTRENAMIENTO Y EL 20% PARA VALIDACIÓN
+dataset = TensorDataset(X_tensor, y_tensor)
+train_ds, val_ds = random_split(dataset, [train_len, val_len])
+
+train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+val_loader = DataLoader(val_ds, batch_size=16, shuffle=False)
+
+CENTRO DEL MODELO
+(batch, 50, 126)
+50 = pasos temporales
+126 = features por frame
+batch = ejemplos por lote
+
+CNN 1D procesa secuencias, no imágenes!!
+self.conv1 = nn.Conv1d(in_channels=features, out_channels=64, kernel_size=3, padding=1)
+self.bn1 = nn.BatchNorm1d(64)
+
+self.conv2 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
+self.bn2 = nn.BatchNorm1d(128)
+LUEGO DE PROCESAR SECUENCIAS INICIALES LO TOMA COMO BASE PARA PROCESAR MAS COMPLEJIDAD
+
+LSTM (aprende dinámicas temporales)
+self.lstm = nn.LSTM(input_size=128, hidden_size=hidden_lstm, batch_first=True)
+- El LSTM recibe los 128 canales por frame
+- Aprende el patrón de movimiento de la seña completa
+
+AL FINAL SE USA EL ÚLTIMO ESTADO DE LA SECUENCIA:
+x = x[:, -1, :]
+
+OPTIMIZADOR Y PÉRDIDA
+optimizer = torch.optim.Adam(...)
+criterion = nn.CrossEntropyLoss()
+
+ENTRENAMIENTO
+out = model(xb)
+loss = criterion(out, yb)
+loss.backward()
+optimizer.step()
+
+- Ajusta pesos usando gradientes
+- Calcula precisión de entrenamiento
+
+VALIDACION
+with torch.no_grad():
+- Más eficiente
+- Evita que PyTorch guarde grafo
+
+EVITA SOBRENTRENAMIENTO
+if val_acc > best_val_acc + 1e-4:
+    save model
+else:
+    patience_counter += 1
+Si no mejora por 8 épocas → detiene el entrenamiento.
+
+GUARDA EL MEJOR MODELO DESPUÉS DEL PROCESADO
+torch.save(model.state_dict(), MODEL_PATH)
+
+RESUMEN:
+1. Recibe una secuencia temporal de manos
+2. CNN1D aprende micro-patrones temporales dentro de la secuencia
+3. LSTM aprende la progresión completa del gesto
+4. El último estado del LSTM representa toda la seña
+5. FC → softmax implícito da la clase final
+
+CÓDIGO PRINCIPAL RECONOCEDOR:
+
+LIBRERÍAS:
+import cv2 (OpenCV)
+import mediapipe as mp
+import numpy as np
+import torch → cargar y ejecutar el modelo de IA entrenado
+import joblib → cargar las etiquetas guardadas (.pkl).
+import time
+from collections import deque → estructura eficiente para manejar la ventana de secuencia.
+
+CONFIGURACIÓN INICIAL:
+SEQ_LEN = 50 → cantidad de frames que componen una secuencia para que el modelo pueda predecir.
+FEATURES = 126 → 21 puntos × 3 coord × 2 manos = 126 valores por frame.
+UMBRAL_CONF = 0.70 → probabilidad mínima para aceptar una predicción.
+VENTANA_ESTABILIDAD = 5 → se deben repetir 5 predicciones iguales para aceptarla.
+TIEMPO_DESAPARECER = 2.0 → segundos para borrar el texto en pantalla si no hay manos.
+
+Inicialización de mediapipe:
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=2,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+Hands() detecta y rastrea manos.
+
+max_num_hands=2 → detección bimanual.
+static_image_mode=False → usa seguimiento, no detecta desde cero cada frame.
+min_detection_confidence=0.5 → mínimo para detectar.
+tracking_confidence=0.5 → confianza para seguir manos ya detectadas.
+
+REVISA SI ESTA USANDO GPU:
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+CARGA LAS ETIQUETAS DE LAS CLASES:  
+id_to_label = joblib.load(LABELS_PATH)
+
+CARGA EL MODELO ANTERIOR
+model = CNN1D_LSTM(...)
+model.load_state_dict(...)
+model.eval()
+
+ORDENA LAS MANOS DE IZQUIERDA O DERECHA PARA convertirlas en vector:
+def extraer_landmarks_ordenados(result):
+    mano_left = np.zeros((21,3))
+    mano_right = np.zeros((21,3))
+
+DIBUJA LAS MANOS SI EXISTEN:
+for hl in result.multi_hand_landmarks:
+    dibujar_manos_colores(...)
+
+UNA VEZ DETECTADA ASIGNA CADA CUAL POR SU POSICIÓN
+for lm, hand_h in zip(result.multi_hand_landmarks, result.multi_handedness):
+
+Si MediaPipe NO distingue izquierda/derecha:
+Entonces decide según:
+xs = [pts[:,0].mean() for pts in landmarks_list]
+- Mano con menor valor X → mano izquierda. 
+- Mano con mayor X → mano derecha.
+
+Y devuelve:
+
+- vector mano izquierda (63 valores)
+- vector mano derecha (63 valores)
+- booleano si ambas manos están detectadas
+
+BUCLE PARA RECONOCIMIENTO EN TIEMPO REAL:
+window = deque(maxlen=SEQ_LEN) -> GUARDA LOS ÚLTIMOS 50 FRAMES (SECUENCIA)
+cap = cv2.VideoCapture(0) -> ABRE LA WEBCAM DISPONIBLE
+
+VARIABLES GLOBALES PARA LA ESPERA DE TIEMPO ANTES DE GRABAR Y EL HISTORIAL EN UNA LISTA
+ultimo_timestamp = time.time()
+ultimo_resultado = ""
+historial = []
+
+PROCESAMIENTO:
+ret, frame = cap.read() -> CAPTURA EL FRAME
+frame_draw = cv2.flip(frame, 1) -> EL VALOR 1 INVIERTE EL ORDEN ESPEJO DE LA CÁMARA
+rgb = cv2.cvtColor(frame_draw, cv2.COLOR_BGR2RGB) -> CONVIERTE A RGB YA QUE MediaPipe RECONOCE SOLO RGB
+result = hands.process(rgb) -> PROCESA MEDIAPIPE
+
+UNE AMBAS MANOS VECTORIZADAS:
+left_vec, right_vec, manos_detectadas = extraer_landmarks_ordenados(result)
+vec = np.concatenate([left_vec, right_vec])
+window.append(vec)
+
+VALIDACIÓN DE LA NO DETECCIÓN DE MANOS:
+if not manos_detectadas:
+    ultimo_resultado = "NO DETECTADO"
+    historial = []
+    ultimo_timestamp = ahora
+
+REINICIA SI NO HAY MANOS!!
+
+if len(window) == SEQ_LEN: -> PREDICE SOLO CUANDO HAY 50 FRAMES
+seq = np.array(window, dtype=np.float32) -> SE ARMA LA SECUENCIA
+seq = (seq - np.mean(seq)) / (np.std(seq) + 1e-6) -> NORMALIZACIÓN
+tensor = torch.tensor(seq).unsqueeze(0).to(device) -> PASA A PyTorch
+
+PREDICCIÓN:
+out = model(tensor)
+probs = torch.softmax(out, dim=1)[0]
+
+VENTANA_ESTABILIDAD
+Evita que un pequeño error cambie la predicción.
+if conf >= UMBRAL_CONF:
+    historial.append(pred_label)
+
+Si la predicción aparece repetida 5 veces seguidas:
+if historial.count(pred_label) >= VENTANA_ESTABILIDAD:
+    ultimo_resultado = pred_label
+    ultimo_timestamp = ahora
+    historial = []
+
+Limpiar texto si pasa cierto tiempo:
+if ahora - ultimo_timestamp > TIEMPO_DESAPARECER:
+    ultimo_resultado = ""
+
+Mostrar texto y ventana:
+cv2.putText(frame_draw, ultimo_resultado, ...)
+cv2.imshow("Reconocedor CNN1D+LSTM", frame_draw)
+
+RESUMEN:
+1. Captura manos en tiempo real.
+2. Las ordena (izquierda/derecha).
+3. Extrae 126 características por frame.
+4. Junta 50 frames → secuencia completa.
+5. Normaliza la secuencia.
+6. Pasa por modelo CNN1D → LSTM.
+7. Obtiene una predicción.
+8. Verifica si se repite al menos 5 veces.
+9. Si sí → la muestra en pantalla.
+10. Si no hay manos → resetea.
+
+
+
+
+
+
+
+
+
+

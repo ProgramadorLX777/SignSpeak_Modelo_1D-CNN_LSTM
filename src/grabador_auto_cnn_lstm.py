@@ -3,17 +3,18 @@ import mediapipe as mp
 import numpy as np
 import os
 import time
+import sys
 
 # Mediapipe
 mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
 
 # Carpeta donde se guardan los datos
 DATA_PATH = "data_cnn_lstm_bimano"
 os.makedirs(DATA_PATH, exist_ok=True)
 
-NUM_SECUENCIAS = 7     # ← SIEMPRE 7 secuencias por clase
+NUM_SECUENCIAS = 10     # ← SIEMPRE 10 secuencias por clase
 NUM_FRAMES = 50        # ← 50 frames por secuencia
-
 
 def extraer_manos(results):
     """
@@ -54,7 +55,7 @@ def grabar_secuencia(nombre_clase, indice):
         min_tracking_confidence=0.6
     ) as hands:
 
-        print(f"\nPreparando secuencia {indice+1}/{NUM_SECUENCIAS}...")
+        print(f"\nPreparando secuencia: {indice+1}/{NUM_SECUENCIAS}...")
 
         # -----------------------------
         # 🔥 NUEVO: Mostramos la ventana ANTES de la cuenta regresiva
@@ -66,7 +67,7 @@ def grabar_secuencia(nombre_clase, indice):
             frame = cv2.flip(frame, 1)
             cv2.putText(frame, "Preparando grabacion...", (30, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,255), 2)
-            cv2.imshow("Grabando...", frame)
+            cv2.imshow("Grabando secuencias...", frame)
             cv2.waitKey(30)
 
         # -----------------------------
@@ -78,10 +79,10 @@ def grabar_secuencia(nombre_clase, indice):
                 frame = cv2.flip(frame, 1)
                 cv2.putText(frame, str(t), (250, 250),
                             cv2.FONT_HERSHEY_SIMPLEX, 4, (0,0,255), 6)
-                cv2.imshow("Grabando...", frame)
+                cv2.imshow("Grabando secuencias...", frame)
                 cv2.waitKey(1000)
 
-        print("GRABANDO...\n")
+        print("GRABANDO SECUENCIAS...\n")
 
         # -----------------------------
         # GRABACIÓN DE LOS 50 FRAMES
@@ -94,7 +95,7 @@ def grabar_secuencia(nombre_clase, indice):
             # Vista con espejo SOLO para mostrar, pero procesamiento sin invertir
             frame_vis = cv2.flip(frame, 1)
 
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img_rgb = cv2.cvtColor(frame_vis, cv2.COLOR_BGR2RGB)
             results = hands.process(img_rgb)
 
             mano_izq, mano_der = extraer_manos(results)
@@ -102,6 +103,17 @@ def grabar_secuencia(nombre_clase, indice):
             # Vector: 42 puntos × 3 coordenadas → (126,)
             frame_vec = np.concatenate([mano_izq.reshape(21,3), mano_der.reshape(21,3)], axis=0).flatten()
             frames.append(frame_vec)
+            
+            # 🔥 DIBUJO DE LANDMARKS (SOLO VISUAL)
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    mp_drawing.draw_landmarks(
+                        frame_vis,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing.DrawingSpec(color=(0,255,0), thickness=2, circle_radius=3),
+                        mp_drawing.DrawingSpec(color=(255,0,0), thickness=2)
+                    )
 
             cv2.putText(
                 frame_vis,
@@ -112,10 +124,18 @@ def grabar_secuencia(nombre_clase, indice):
                 (0, 255, 0),
                 2
             )
-            cv2.imshow("Grabando...", frame_vis)
+            cv2.imshow("Grabando Secuencias...", frame_vis)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            key = cv2.waitKey(1) & 0xFF 
+            
+            if key == 27:  # ESC
+                print("⛔ Grabación cancelada por el usuario.")
+                cap.release()
+                cv2.destroyAllWindows()
+                sys.exit(0)
+
+            '''if cv2.waitKey(1) & 0xFF == ord('q'):
+                break'''
 
     cap.release()
     cv2.destroyAllWindows()

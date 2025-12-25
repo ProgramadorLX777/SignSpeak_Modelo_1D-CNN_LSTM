@@ -26,9 +26,10 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 # -------------------------
-# CARGA DATOS
+# CARGA DATOS CON NORMALIZACIÓN POR SECUENCIA
 # -------------------------
 X_list, y_list = [], []
+
 labels = sorted([d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d))])
 if not labels:
     raise SystemExit(f"No se encontraron clases en {DATA_DIR}")
@@ -46,23 +47,28 @@ for lbl in labels:
         if arr.shape != (SEQ_LEN, FEATURES):
             print(f"Ignorado {f} en {lbl}: shape {arr.shape}")
             continue
-        X_list.append(arr.astype(np.float32))
+
+        # 🔥 Normalización por secuencia
+        arr = arr.astype(np.float32)
+        arr = (arr - arr.mean()) / (arr.std() + 1e-6)
+
+        X_list.append(arr)
         y_list.append(label_to_id[lbl])
 
 if len(X_list) == 0:
-    raise SystemExit("No hay secuencias válidas para entrenar. Revisa tus .npy y SEQ_LEN/FEATURES.")
+    raise SystemExit("No hay secuencias válidas para entrenar.")
 
-X = np.stack(X_list)  # (N, SEQ_LEN, FEATURES)
+X = np.stack(X_list)
 y = np.array(y_list, dtype=np.int64)
 
 print("Dataset:", X.shape, y.shape)
 
-# Convertir a tensores y crear dataset
+# Tensores
 X_tensor = torch.tensor(X)
 y_tensor = torch.tensor(y)
 dataset = TensorDataset(X_tensor, y_tensor)
 
-# split
+# Split
 val_len = int(len(dataset) * VALID_SPLIT)
 train_len = len(dataset) - val_len
 train_ds, val_ds = random_split(dataset, [train_len, val_len])
@@ -71,33 +77,48 @@ train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 
 # -------------------------
-# MODELO: 1D-CNN (temporal) + LSTM
+# MODELO MEJORADO: CNN1D + BiLSTM
 # -------------------------
 class CNN1D_LSTM(nn.Module):
     def __init__(self, features, hidden_lstm=128, num_classes=2):
         super().__init__()
-        # Conv1d expects (batch, channels, seq_len) -> channels = features
-        self.conv1 = nn.Conv1d(in_channels=features, out_channels=64, kernel_size=3, padding=1)
+
+        self.conv1 = nn.Conv1d(features, 64, 3, padding=1)
         self.bn1 = nn.BatchNorm1d(64)
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+
+        self.conv2 = nn.Conv1d(64, 128, 3, padding=1)
         self.bn2 = nn.BatchNorm1d(128)
+
+        # 🔥 Nueva capa CNN opcional
+        self.conv3 = nn.Conv1d(128, 128, 3, padding=1)
+        self.bn3 = nn.BatchNorm1d(128)
+
         self.relu = nn.ReLU()
-        # after conv, transpose to (batch, seq_len, channels) for LSTM
-        self.lstm = nn.LSTM(input_size=128, hidden_size=hidden_lstm, batch_first=True)
-        self.fc = nn.Linear(hidden_lstm, num_classes)
-        self.dropout = nn.Dropout(0.3)
+
+        # 🔥 Bidireccional
+        self.lstm = nn.LSTM(
+            input_size=128,
+            hidden_size=hidden_lstm,
+            batch_first=True,
+            bidirectional=True
+        )
+
+        self.dropout = nn.Dropout(0.35)
+        self.fc = nn.Linear(hidden_lstm * 2, num_classes)
 
     def forward(self, x):
-        # x: (batch, seq_len, features)
-        x = x.permute(0, 2, 1)  # -> (batch, features, seq_len)
+        x = x.permute(0, 2, 1)
+
         x = self.relu(self.bn1(self.conv1(x)))
-        x = self.relu(self.bn2(self.conv2(x)))  # (batch, 128, seq_len)
-        x = x.permute(0, 2, 1)  # -> (batch, seq_len, 128)
-        x, _ = self.lstm(x)     # (batch, seq_len, hidden)
-        x = x[:, -1, :]         # last timestep
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.relu(self.bn3(self.conv3(x)))
+
+        x = x.permute(0, 2, 1)
+        x, _ = self.lstm(x)
+
+        x = x[:, -1, :]
         x = self.dropout(x)
-        x = self.fc(x)
-        return x
+        return self.fc(x)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = CNN1D_LSTM(FEATURES, hidden_lstm=128, num_classes=len(labels)).to(device)
@@ -105,27 +126,35 @@ model = CNN1D_LSTM(FEATURES, hidden_lstm=128, num_classes=len(labels)).to(device
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-5)
 criterion = nn.CrossEntropyLoss()
 
+# 🔥 Scheduler de reducción dinámica del LR
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, patience=3, factor=0.5, verbose=True
+)
+
 # -------------------------
-# ENTRENAMIENTO
+# ENTRENAMIENTO MEJORADO
 # -------------------------
 best_val_acc = 0.0
-patience = 8
+patience = 10
 patience_counter = 0
 
-for epoch in range(1, EPOCHS+1):
+for epoch in range(1, EPOCHS + 1):
     model.train()
     total_loss = 0.0
     correct = 0
     total = 0
 
     for xb, yb in train_loader:
-        xb = xb.to(device)
-        yb = yb.to(device)
+        xb, yb = xb.to(device), yb.to(device)
 
         optimizer.zero_grad()
         out = model(xb)
         loss = criterion(out, yb)
         loss.backward()
+
+        # 🔥 Evitar explosión de gradientes
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+
         optimizer.step()
 
         total_loss += loss.item() * xb.size(0)
@@ -133,37 +162,42 @@ for epoch in range(1, EPOCHS+1):
         correct += (preds == yb).sum().item()
         total += xb.size(0)
 
-    train_loss = total_loss / total
     train_acc = correct / total
+    train_loss = total_loss / total
 
-    # validación
+    # VALIDACIÓN
     model.eval()
     val_correct = 0
     val_total = 0
+    val_loss = 0.0
+
     with torch.no_grad():
         for xb, yb in val_loader:
-            xb = xb.to(device)
-            yb = yb.to(device)
+            xb, yb = xb.to(device), yb.to(device)
             out = model(xb)
-            preds = out.argmax(dim=1)
-            val_correct += (preds == yb).sum().item()
+            loss = criterion(out, yb)
+
+            val_loss += loss.item()
+            val_correct += (out.argmax(1) == yb).sum().item()
             val_total += xb.size(0)
 
-    val_acc = val_correct / val_total if val_total > 0 else 0.0
+    val_acc = val_correct / val_total
+    val_loss /= len(val_loader)
 
-    print(f"Epoch {epoch}/{EPOCHS} - train_loss: {train_loss:.4f} train_acc: {train_acc:.3f} val_acc: {val_acc:.3f}")
+    scheduler.step(val_loss)
 
-    # early stopping simple
+    print(f"Epoch {epoch}/{EPOCHS} | loss:{train_loss:.4f} acc:{train_acc:.3f} | val_acc:{val_acc:.3f}")
+
+    # Early stopping
     if val_acc > best_val_acc + 1e-4:
         best_val_acc = val_acc
         patience_counter = 0
         torch.save(model.state_dict(), MODEL_PATH)
-        print("  ✔ Modelo guardado (mejor val_acc).")
+        print("  ✔ Modelo mejorado guardado.")
     else:
         patience_counter += 1
         if patience_counter >= patience:
-            print("Early stopping por no mejora")
+            print("✖ Early stopping.")
             break
 
-print("Entrenamiento finalizado. Mejor val_acc:", best_val_acc)
-print("Modelo final (último guardado) en:", MODEL_PATH)
+print("✓ Entrenamiento finalizado. Mejor val_acc:", best_val_acc)
